@@ -38,12 +38,14 @@ python -c "import sqlite3; c=sqlite3.connect('data/raydium_monitor.db'); print(*
 ## Alertas
 
 - `LOW_APR` si APR < 30%.
-- `HIGH_APR` si APR > 60%.
-- `BIG_MOVE` si cambia al menos 10 puntos porcentuales y no está en LOW/HIGH.
-- `NORMAL` entre 30% y 60% sin movimiento grande.
+- `NORMAL` si APR está entre 30% y 60% inclusive.
+- `HIGH_APR` si APR está por encima de 60% y hasta 100%.
+- `VERY_HIGH` si APR está por encima de 100% y hasta 150%.
+- `EXTREME` si APR está por encima de 150% y hasta 200%.
+- `EXTREME_PLUS` si APR > 200%.
 - `API_DEGRADED` después de 3 fallos consecutivos.
 
-Se evitan repeticiones mientras el estado no cambia. La última lectura válida, estado y contador de fallos se guardan en SQLite para sobrevivir reinicios.
+Se envía alerta al cruzar cada banda, tanto al subir como al bajar. Dentro de una misma banda se alerta sólo cuando el APR se aleja al menos 20 puntos porcentuales desde la última alerta. La última lectura válida, estado, referencia de alerta y contador de fallos se guardan en SQLite para sobrevivir reinicios.
 
 ## Crear el bot de Telegram
 
