@@ -4,7 +4,7 @@ Worker Python mínimo para Railway que consulta exclusivamente la API oficial V3
 
 `GET https://api-v3.raydium.io/pools/info/ids?ids=58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2`
 
-El parser valida `success`, verifica el ID exacto y lee el APR 24h desde `data[0].day.apr` (la respuesta efectiva del SDK/API V3). Si el esquema no coincide, registra una muestra acotada de la respuesta y no estima ningún valor.
+El parser valida `success`, verifica el ID exacto y lee el APR 24h, el volumen 24h y el TVL desde `data[0].day.apr`, `data[0].day.volume` y `data[0].tvl`. Si el esquema no coincide, registra una muestra acotada de la respuesta y no estima ningún valor.
 
 ## Archivos
 
@@ -32,7 +32,7 @@ Para una prueba rápida se puede usar `CHECK_INTERVAL_SECONDS=30`. El worker eje
 La base se puede inspeccionar con:
 
 ```powershell
-python -c "import sqlite3; c=sqlite3.connect('data/raydium_monitor.db'); print(*c.execute('select timestamp_utc, apr, state, error from readings order by id desc limit 10'), sep='\n')"
+python -c "import sqlite3; c=sqlite3.connect('data/raydium_monitor.db'); print(*c.execute('select timestamp_utc, apr, state, volume_24h, tvl, volume_state, error from readings order by id desc limit 10'), sep='\n')"
 ```
 
 ## Alertas
@@ -46,6 +46,15 @@ python -c "import sqlite3; c=sqlite3.connect('data/raydium_monitor.db'); print(*
 - `API_DEGRADED` después de 3 fallos consecutivos.
 
 Se envía alerta al cruzar cada banda, tanto al subir como al bajar. Dentro de una misma banda se alerta sólo cuando el APR se aleja al menos 20 puntos porcentuales desde la última alerta. La última lectura válida, estado, referencia de alerta y contador de fallos se guardan en SQLite para sobrevivir reinicios.
+
+Todas las alertas de APR incluyen volumen 24h, TVL y el ratio volumen/TVL. El volumen se monitorea de forma independiente:
+
+- `VOLUME_MOVE` si cambia al menos 25% y USD 2 millones desde la última alerta de volumen.
+- `HIGH_TURNOVER` si volumen/TVL es al menos 2x.
+- `LOW_TURNOVER` si volumen/TVL es como máximo 0,25x.
+- `VOLUME_NORMAL` en el resto de los casos.
+
+La primera lectura sólo establece la referencia de volumen y no genera una alerta de volumen falsa. La referencia y el estado también sobreviven reinicios mediante SQLite.
 
 ## Crear el bot de Telegram
 
@@ -72,7 +81,7 @@ Logs esperados:
 
 ```text
 Worker iniciado; pool=58oQChx...; intervalo=300s
-APR 24h válido: 44.80%; estado=NORMAL
+Métricas válidas: APR=44.80% estado=NORMAL volumen24h=USD 12.50 M TVL=USD 14.00 M rotación=0.89x estado_volumen=VOLUME_NORMAL
 ```
 
 Un fallo se verá como `Raydium API falló (1/3): ...`; al tercer fallo aparece `Alerta API_DEGRADED enviada`. Nunca se usa otra fuente ni se calcula el APR localmente.
