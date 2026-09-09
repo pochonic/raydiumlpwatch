@@ -1,4 +1,4 @@
-"""Minimal Raydium APR monitor for Railway."""
+"""Raydium APR and Backyard vault monitors for Railway."""
 
 from __future__ import annotations
 
@@ -19,8 +19,19 @@ import requests
 POOL_ID = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"
 RAYDIUM_URL = "https://api-v3.raydium.io/pools/info/ids"
 DB_PATH = os.path.join("data", "raydium_monitor.db")
+BACKYARD_VAULT_ID = os.getenv(
+    "BACKYARD_VAULT_ID", "abc49ba6-f259-4e33-9daf-2370b7879cd1"
+)
+BACKYARD_URL = "https://alpha.api.backyard.finance/vaults"
 LOW_THRESHOLD = 30.0
 HIGH_THRESHOLD = 60.0
+BACKYARD_LOW_APY_THRESHOLD = float(os.getenv("BACKYARD_LOW_APY_THRESHOLD", "10"))
+BACKYARD_HIGH_APY_THRESHOLD = float(os.getenv("BACKYARD_HIGH_APY_THRESHOLD", "20"))
+BACKYARD_APY_CHANGE_THRESHOLD = float(os.getenv("BACKYARD_APY_CHANGE_THRESHOLD", "3"))
+BACKYARD_TVL_DROP_THRESHOLD = float(os.getenv("BACKYARD_TVL_DROP_THRESHOLD", "0.10"))
+BACKYARD_LP_PRICE_DROP_THRESHOLD = float(
+    os.getenv("BACKYARD_LP_PRICE_DROP_THRESHOLD", "0.01")
+)
 VOLUME_CHANGE_THRESHOLD = 0.25
 VOLUME_CHANGE_MIN_USD = 2_000_000.0
 LOW_TURNOVER_THRESHOLD = 0.25
@@ -54,6 +65,30 @@ class PoolMetrics:
     tvl: float
 
 
+@dataclass
+class BackyardState:
+    last_apy: Optional[float] = None
+    last_tvl: Optional[float] = None
+    last_lp_price: Optional[float] = None
+    last_state: str = "NORMAL"
+    last_alert_apy: Optional[float] = None
+    last_alert_tvl: Optional[float] = None
+    last_alert_lp_price: Optional[float] = None
+    consecutive_api_failures: int = 0
+
+
+@dataclass(frozen=True)
+class BackyardMetrics:
+    name: str
+    platform: str
+    apy: float
+    backyard_tvl_usd: float
+    protocol_tvl_usd: float
+    lp_price: float
+    asset_price: float
+    cooldown_seconds: int
+
+
 class Storage:
     def __init__(self, path: str = DB_PATH) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -66,6 +101,29 @@ class Storage:
                 apr REAL,
                 state TEXT NOT NULL,
                 error TEXT
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backyard_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                apy REAL,
+                state TEXT NOT NULL,
+                backyard_tvl_usd REAL,
+                protocol_tvl_usd REAL,
+                lp_price REAL,
+                asset_price REAL,
+                error TEXT
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backyard_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
             """
         )
@@ -154,6 +212,84 @@ class Storage:
     def close(self) -> None:
         self.connection.close()
 
+    def load_backyard(self) -> BackyardState:
+        values = {
+            key: value
+            for key, value in self.connection.execute(
+                "SELECT key, value FROM backyard_state"
+            )
+        }
+        return BackyardState(
+            last_apy=float(values["last_apy"]) if values.get("last_apy") else None,
+            last_tvl=float(values["last_tvl"]) if values.get("last_tvl") else None,
+            last_lp_price=(
+                float(values["last_lp_price"])
+                if values.get("last_lp_price")
+                else None
+            ),
+            last_state=values.get("last_state", "NORMAL"),
+            last_alert_apy=(
+                float(values["last_alert_apy"])
+                if values.get("last_alert_apy")
+                else None
+            ),
+            last_alert_tvl=(
+                float(values["last_alert_tvl"])
+                if values.get("last_alert_tvl")
+                else None
+            ),
+            last_alert_lp_price=(
+                float(values["last_alert_lp_price"])
+                if values.get("last_alert_lp_price")
+                else None
+            ),
+            consecutive_api_failures=int(values.get("consecutive_api_failures", "0")),
+        )
+
+    def save_backyard(self, state: BackyardState) -> None:
+        values = {
+            "last_apy": "" if state.last_apy is None else str(state.last_apy),
+            "last_tvl": "" if state.last_tvl is None else str(state.last_tvl),
+            "last_lp_price": "" if state.last_lp_price is None else str(state.last_lp_price),
+            "last_state": state.last_state,
+            "last_alert_apy": "" if state.last_alert_apy is None else str(state.last_alert_apy),
+            "last_alert_tvl": "" if state.last_alert_tvl is None else str(state.last_alert_tvl),
+            "last_alert_lp_price": "" if state.last_alert_lp_price is None else str(state.last_alert_lp_price),
+            "consecutive_api_failures": str(state.consecutive_api_failures),
+        }
+        self.connection.executemany(
+            "INSERT INTO backyard_state(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            values.items(),
+        )
+        self.connection.commit()
+
+    def record_backyard(
+        self,
+        timestamp: str,
+        apy: Optional[float],
+        state: str,
+        metrics: Optional[BackyardMetrics] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO backyard_readings(
+                timestamp_utc, apy, state, backyard_tvl_usd, protocol_tvl_usd,
+                lp_price, asset_price, error
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                timestamp,
+                apy,
+                state,
+                metrics.backyard_tvl_usd if metrics else None,
+                metrics.protocol_tvl_usd if metrics else None,
+                metrics.lp_price if metrics else None,
+                metrics.asset_price if metrics else None,
+                error,
+            ),
+        )
+        self.connection.commit()
+
 
 class RaydiumClient:
     def fetch_metrics(self) -> PoolMetrics:
@@ -189,6 +325,58 @@ class RaydiumClient:
                 f"respuesta relevante: {json.dumps(pool, ensure_ascii=False)[:1500]}"
             ) from exc
         return PoolMetrics(apr=apr, volume_24h=volume_24h, tvl=tvl)
+
+
+class BackyardClient:
+    def fetch_metrics(self) -> BackyardMetrics:
+        response = requests.get(
+            f"{BACKYARD_URL}/{BACKYARD_VAULT_ID}",
+            timeout=API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Backyard respondió JSON inválido: {response.text[:500]}"
+            ) from exc
+
+        chart_response = requests.get(
+            f"{BACKYARD_URL}/{BACKYARD_VAULT_ID}/chart",
+            params={"range": "1W"},
+            timeout=API_TIMEOUT_SECONDS,
+        )
+        chart_response.raise_for_status()
+        try:
+            chart_payload = chart_response.json()
+            chart_data = chart_payload["data"]
+            latest_chart = chart_data[-1]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Backyard devolvió un histórico inválido o vacío: "
+                f"{chart_response.text[:1200]}"
+            ) from exc
+
+        try:
+            return BackyardMetrics(
+                name=str(payload["name"]),
+                platform=str(payload["platform"]),
+                apy=parse_metric(payload["apy"], "apy"),
+                backyard_tvl_usd=parse_metric(
+                    payload["backyardTvlUsd"], "backyardTvlUsd"
+                ),
+                protocol_tvl_usd=parse_metric(
+                    payload["protocolTvlUsd"], "protocolTvlUsd"
+                ),
+                lp_price=parse_metric(latest_chart["lpPrice"], "chart.lpPrice"),
+                asset_price=parse_metric(payload["assetPrice"], "assetPrice"),
+                cooldown_seconds=int(payload.get("cooldownSeconds", 0)),
+            )
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(
+                "Falta una métrica numérica esperada de Backyard; "
+                f"respuesta relevante: {json.dumps(payload, ensure_ascii=False)[:1800]}"
+            ) from exc
 
 
 class TelegramClient:
@@ -260,6 +448,10 @@ def format_usd(value: Optional[float]) -> str:
     if value >= 1_000:
         return f"USD {value / 1_000:.1f} K"
     return f"USD {value:.2f}"
+
+
+def format_price(value: Optional[float]) -> str:
+    return "n/a" if value is None else f"{value:.6f}"
 
 
 def turnover_ratio(volume_24h: float, tvl: float) -> Optional[float]:
@@ -355,6 +547,148 @@ def should_alert(apr: float, previous_state: str, new_state: str, last_alert_apr
         and last_alert_apr is not None
         and abs(apr - last_alert_apr) >= 20.0
     )
+
+
+def classify_backyard_apy(apy: float) -> str:
+    if apy < BACKYARD_LOW_APY_THRESHOLD:
+        return "LOW_APY"
+    if apy > BACKYARD_HIGH_APY_THRESHOLD:
+        return "HIGH_APY"
+    return "NORMAL"
+
+
+def short_vault_id() -> str:
+    return f"{BACKYARD_VAULT_ID[:6]}...{BACKYARD_VAULT_ID[-4:]}"
+
+
+def backyard_total_tvl(metrics: BackyardMetrics) -> float:
+    return metrics.backyard_tvl_usd + metrics.protocol_tvl_usd
+
+
+def backyard_message(
+    metrics: BackyardMetrics,
+    previous_apy: Optional[float],
+    state: str,
+    reason: str,
+) -> str:
+    total_tvl = backyard_total_tvl(metrics)
+    apy_change = "n/a" if previous_apy is None else f"{metrics.apy - previous_apy:+.2f} pp"
+    cooldown_hours = metrics.cooldown_seconds / 3600
+    return (
+        f"Backyard {metrics.name}\n"
+        f"Vault: {short_vault_id()}\n"
+        f"Plataforma: {metrics.platform}\n"
+        f"Motivo: {reason}\n"
+        f"APY: {metrics.apy:.2f}% ({apy_change})\n"
+        f"TVL total: {format_usd(total_tvl)}\n"
+        f"TVL Backyard: {format_usd(metrics.backyard_tvl_usd)}\n"
+        f"TVL protocolo: {format_usd(metrics.protocol_tvl_usd)}\n"
+        f"LP price: {format_price(metrics.lp_price)}\n"
+        f"Precio activo: {format_price(metrics.asset_price)}\n"
+        f"Cooldown: {cooldown_hours:.0f} h\n"
+        f"Estado: {state}\n"
+        f"Hora: {utc_now().strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+
+def backyard_api_degraded_message() -> str:
+    return (
+        f"Backyard {BACKYARD_VAULT_ID}\n"
+        "Estado: API_DEGRADED\n"
+        "La API falló 3 ciclos consecutivos. Se reintentará en el próximo ciclo.\n"
+        f"Hora: {utc_now().strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+
+def process_backyard_cycle(
+    client: BackyardClient,
+    telegram: TelegramClient,
+    storage: Storage,
+    state: BackyardState,
+) -> None:
+    timestamp = utc_now().isoformat()
+    previous_apy = state.last_apy
+    previous_state = state.last_state
+    try:
+        metrics = client.fetch_metrics()
+    except Exception as exc:
+        state.consecutive_api_failures += 1
+        error = str(exc)
+        LOGGER.error(
+            "Backyard API falló (%s/3): %s", state.consecutive_api_failures, error
+        )
+        storage.record_backyard(timestamp, None, "API_DEGRADED", error=error)
+        if state.consecutive_api_failures == 3 and previous_state != "API_DEGRADED":
+            try:
+                telegram.send(backyard_api_degraded_message())
+                LOGGER.warning("Alerta Backyard API_DEGRADED enviada")
+            except Exception as telegram_error:
+                LOGGER.error(
+                    "No se pudo enviar alerta Backyard API_DEGRADED: %s",
+                    safe_error(telegram_error, telegram.token),
+                )
+            state.last_state = "API_DEGRADED"
+        storage.save_backyard(state)
+        return
+
+    state.consecutive_api_failures = 0
+    total_tvl = backyard_total_tvl(metrics)
+    previous_total_tvl = state.last_tvl
+    apy_state = classify_backyard_apy(metrics.apy)
+    LOGGER.info(
+        "Backyard válido: vault=%s APY=%.2f%% estado=%s TVL=%s (Backyard=%s protocolo=%s) LP price=%.6f",
+        BACKYARD_VAULT_ID,
+        metrics.apy,
+        apy_state,
+        format_usd(total_tvl),
+        format_usd(metrics.backyard_tvl_usd),
+        format_usd(metrics.protocol_tvl_usd),
+        metrics.lp_price,
+    )
+
+    alerts: list[tuple[str, str]] = []
+    if previous_state == "API_DEGRADED":
+        alerts.append((apy_state, "RECOVERY"))
+    elif previous_apy is not None:
+        if apy_state != previous_state:
+            alerts.append((apy_state, "CAMBIO DE BANDA APY"))
+        elif state.last_alert_apy is not None and abs(metrics.apy - state.last_alert_apy) >= BACKYARD_APY_CHANGE_THRESHOLD:
+            alerts.append((apy_state, "CAMBIO APY"))
+
+    tvl_reference = state.last_alert_tvl or previous_total_tvl
+    if tvl_reference and total_tvl <= tvl_reference * (1 - BACKYARD_TVL_DROP_THRESHOLD):
+        alerts.append(("TVL_DROP", "CAÍDA TVL"))
+    lp_reference = state.last_alert_lp_price or state.last_lp_price
+    if lp_reference and metrics.lp_price <= lp_reference * (1 - BACKYARD_LP_PRICE_DROP_THRESHOLD):
+        alerts.append(("LP_PRICE_DROP", "CAÍDA LP PRICE"))
+
+    for alert_state, reason in alerts:
+        try:
+            telegram.send(backyard_message(metrics, previous_apy, alert_state, reason))
+            LOGGER.info("Alerta Backyard Telegram enviada: %s", reason)
+            if reason in {"CAMBIO DE BANDA APY", "CAMBIO APY", "RECOVERY"}:
+                state.last_alert_apy = metrics.apy
+            if reason == "CAÍDA TVL":
+                state.last_alert_tvl = total_tvl
+            if reason == "CAÍDA LP PRICE":
+                state.last_alert_lp_price = metrics.lp_price
+        except Exception as exc:
+            LOGGER.error(
+                "No se pudo enviar alerta Backyard: %s", safe_error(exc, telegram.token)
+            )
+
+    if state.last_apy is None:
+        state.last_alert_apy = metrics.apy
+        state.last_alert_tvl = total_tvl
+        state.last_alert_lp_price = metrics.lp_price
+        LOGGER.info("Referencias iniciales de Backyard establecidas sin alerta")
+
+    state.last_apy = metrics.apy
+    state.last_tvl = total_tvl
+    state.last_lp_price = metrics.lp_price
+    state.last_state = apy_state
+    storage.record_backyard(timestamp, metrics.apy, apy_state, metrics=metrics)
+    storage.save_backyard(state)
 
 
 def process_cycle(client: RaydiumClient, telegram: TelegramClient, storage: Storage, state: MonitorState) -> None:
@@ -461,7 +795,9 @@ def main() -> None:
 
     storage = Storage()
     state = storage.load()
+    backyard_state = storage.load_backyard()
     client = RaydiumClient()
+    backyard_client = BackyardClient()
     telegram = TelegramClient()
     running = True
 
@@ -473,18 +809,21 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
     LOGGER.info(
-        "Worker iniciado; pool=%s; intervalo=%ss; último APR=%s; estado=%s; último volumen=%s; estado_volumen=%s",
+        "Worker iniciado; pool=%s; vault_backyard=%s; intervalo=%ss; último APR=%s; estado=%s; último volumen=%s; estado_volumen=%s; último APY Backyard=%s",
         POOL_ID,
+        BACKYARD_VAULT_ID,
         interval,
         format_apr(state.last_valid_apr),
         state.last_state,
         format_usd(state.last_valid_volume),
         state.last_volume_state or "sin referencia",
+        format_apr(backyard_state.last_apy),
     )
     try:
         while running:
             cycle_started = time.monotonic()
             process_cycle(client, telegram, storage, state)
+            process_backyard_cycle(backyard_client, telegram, storage, backyard_state)
             elapsed = time.monotonic() - cycle_started
             time.sleep(max(0.0, interval - elapsed))
     finally:
