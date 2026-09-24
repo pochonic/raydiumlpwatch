@@ -1,8 +1,25 @@
-# Raydium APR + Backyard Vault Watcher
+# Raydium APR + Backyard + CLMM Watcher
+
+`python main.py` ejecuta los tres monitores en un único servicio de Railway,
+con el mismo bot y volumen existente. SOL/USDC y Backyard conservan
+`CHECK_INTERVAL_SECONDS=300`; STONK/USDC usa `CLMM_CHECK_INTERVAL_SECONDS=60`.
+Los ciclos se ejecutan de forma secuencial con intervalos independientes; una
+consulta lenta puede retrasar la siguiente, sin duplicar ciclos atrasados.
+Un fallo de un monitor se registra sin impedir que continúen los demás.
+
+Para actualizar el servicio existente: hacer push, mantener Start Command
+`python main.py` (o el Procfile actual) y desplegar el nuevo commit.
+Conservar `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` y el volumen `/app/data`.
+Opcionalmente fijar `CLMM_DB_PATH=/app/data/clmm_monitor.db` y
+`CLMM_CHECK_INTERVAL_SECONDS=60`. El NFT y el RPC público ya tienen valores
+predeterminados. No hace falta un servicio nuevo. Si se había creado un servicio
+CLMM separado, detenerlo para evitar alertas duplicadas.
+En los logs aparecerá `CLMM habilitado` y luego `CLMM precio=...`, además de las
+lecturas habituales de SOL/USDC y Backyard.
 
 ## Monitor CLMM STONK/USDC
 
-`clmm_monitor.py` es un worker independiente para el pool
+`clmm_monitor.py` es el módulo CLMM, también ejecutable por separado, para el pool
 `G4G5SzkbLFMhoSgHiQNeyJFt75sSDsL1rD8LVyT5xZbU`.
 Usa el mismo bot que el monitor existente y agrega `solders` para validar
 direcciones Solana. Instalar dependencias con `python -m pip install -r requirements.txt`.
@@ -15,9 +32,8 @@ python clmm_monitor.py
 
 `--once` consulta la API y muestra las métricas sin enviar Telegram ni escribir
 la base. El modo continuo requiere `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`,
-envía un resumen inicial y comprueba cada 60 segundos. Para Railway, crear otro
-servicio con Start Command `python clmm_monitor.py`, las variables del bot y un
-volumen en `/app/data`. El Procfile existente sigue ejecutando el monitor anterior.
+envía un resumen inicial y comprueba cada 60 segundos. En Railway se integra
+automáticamente al ejecutar `python main.py`; el Procfile no requiere cambios.
 
 | Variable | Valor predeterminado | Significado |
 |---|---|---|

@@ -1,13 +1,15 @@
-"""Raydium APR and Backyard vault monitors for Railway."""
+"""Raydium APR, Backyard and CLMM position monitors for one Railway worker."""
 
 from __future__ import annotations
 
 import json
+import html
 import logging
 import os
 import signal
 import sqlite3
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -387,9 +389,13 @@ class TelegramClient:
     def send(self, message: str) -> None:
         if not self.token or not self.chat_id:
             raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
+        title, separator, body = message.partition("\n")
+        formatted = f"<b>{html.escape(title)}</b>"
+        if separator:
+            formatted += "\n" + html.escape(body)
         response = requests.post(
             f"https://api.telegram.org/bot{self.token}/sendMessage",
-            json={"chat_id": self.chat_id, "text": message},
+            json={"chat_id": self.chat_id, "text": formatted, "parse_mode": "HTML"},
             timeout=API_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -788,23 +794,52 @@ def process_cycle(client: RaydiumClient, telegram: TelegramClient, storage: Stor
     storage.save_state(state)
 
 
+def run_monitors(jobs, stop, telegram, clock=time.monotonic):
+    """Run due jobs serially with separate deadlines; never replay missed cycles."""
+    deadlines = [clock()] * len(jobs)
+    while not stop.is_set():
+        for index, (name, interval, callback) in enumerate(jobs):
+            if stop.is_set():
+                return
+            if clock() < deadlines[index]:
+                continue
+            started = clock()
+            try:
+                callback()
+            except Exception as exc:
+                LOGGER.error("Ciclo %s falló: %s", name, safe_error(exc, telegram.token))
+            deadlines[index] = max(started + interval, clock())
+        stop.wait(max(0.0, min(deadlines) - clock()))
+
+
 def main() -> None:
+    # Imported here because the standalone CLMM script reuses helpers from main.
+    import clmm_monitor
+
     interval = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
     if interval <= 0:
         raise ValueError("CHECK_INTERVAL_SECONDS debe ser mayor que cero")
+    clmm_interval = int(os.getenv("CLMM_CHECK_INTERVAL_SECONDS", "60"))
+    if clmm_interval <= 0:
+        raise ValueError("CLMM_CHECK_INTERVAL_SECONDS debe ser mayor que cero")
+    clmm_config = clmm_monitor.Config.from_env()
 
     storage = Storage()
+    try:
+        clmm_storage = clmm_monitor.Store(os.getenv("CLMM_DB_PATH", "data/clmm_monitor.db"))
+    except Exception:
+        storage.close()
+        raise
     state = storage.load()
     backyard_state = storage.load_backyard()
     client = RaydiumClient()
     backyard_client = BackyardClient()
     telegram = TelegramClient()
-    running = True
+    stop = threading.Event()
 
     def stop_handler(signum: int, _frame: Any) -> None:
-        nonlocal running
         LOGGER.info("Señal %s recibida; cerrando worker", signum)
-        running = False
+        stop.set()
 
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
@@ -819,14 +854,17 @@ def main() -> None:
         state.last_volume_state or "sin referencia",
         format_apr(backyard_state.last_apy),
     )
+    LOGGER.info("CLMM habilitado; pool=%s; NFT=%s; intervalo=%ss",
+                clmm_monitor.POOL_ID,
+                os.getenv("CLMM_NFT_MINT", clmm_monitor.DEFAULT_NFT), clmm_interval)
     try:
-        while running:
-            cycle_started = time.monotonic()
-            process_cycle(client, telegram, storage, state)
-            process_backyard_cycle(backyard_client, telegram, storage, backyard_state)
-            elapsed = time.monotonic() - cycle_started
-            time.sleep(max(0.0, interval - elapsed))
+        run_monitors([
+            ("CLMM", clmm_interval, lambda: clmm_monitor.process_cycle(clmm_storage, clmm_config, telegram)),
+            ("SOL/USDC", interval, lambda: process_cycle(client, telegram, storage, state)),
+            ("Backyard", interval, lambda: process_backyard_cycle(backyard_client, telegram, storage, backyard_state)),
+        ], stop, telegram)
     finally:
+        clmm_storage.db.close()
         storage.close()
         LOGGER.info("Worker detenido")
 
