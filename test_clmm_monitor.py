@@ -43,7 +43,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(telegram.send.call_count, 4)
         fetch.side_effect = None
         cycle()
-        self.assertIn("API_RECOVERED", telegram.send.call_args.args[0])
+        self.assertIn("API recuperada", telegram.send.call_args.args[0])
         self.assertEqual(telegram.send.call_count, 5)
 
     @patch("clmm_monitor.requests.get")

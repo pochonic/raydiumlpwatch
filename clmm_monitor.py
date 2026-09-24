@@ -115,32 +115,36 @@ def message(metrics, config, reasons):
     config = position_config(metrics, config)
     price = metrics["price"]
     position = metrics.get("position")
-    personal = ""
+    labels = {
+        "IN_RANGE": "Dentro del rango",
+        "NEAR_LOWER": "Cerca del límite inferior",
+        "NEAR_UPPER": "Cerca del límite superior",
+        "OUT_BELOW": "Fuera del rango (por debajo)",
+        "OUT_ABOVE": "Fuera del rango (por encima)",
+        "NO_LIQUIDITY": "Sin liquidez",
+    }
+    status = snapshot_status(metrics, config)
+    lines = ["Raydium CLMM STONK/USDC", labels.get(status, status)]
+    notices = ["API recuperada" if reason == "API_RECOVERED" else reason.capitalize()
+               for reason in reasons if reason not in {"INICIO", "CONSULTA", "CAMBIO DE RANGO"}]
+    if notices:
+        lines.append("Aviso: " + ", ".join(notices))
+    lines.extend([
+        f"Precio: {price:.4f} USDC",
+        f"Rango: {config.lower:.4f} – {config.upper:.4f}",
+    ])
     if position:
-        personal = (
-            f"NFT: {position['nft']}\n"
-            f"Saldo estimado: {position['stonk']:.6f} STONK + {position['usdc']:.6f} USDC\n"
-            f"Valor estimado sin fees: {position['value_usdc']:.4f} USDC\n"
-            f"Fees pendientes: {position['fee_stonk']:.9f} STONK + {position['fee_usdc']:.6f} USDC\n"
-            f"Valor fees al precio del pool: {position['fee_value_usdc']:.6f} USDC\n"
-            f"Slot Solana (confirmed): {position['slot']}\n"
-        )
-    return (
-        f"Raydium CLMM STONK/USDC\nPool: {POOL_ID}\n"
-        f"Aviso: {', '.join(reasons)}\n"
-        f"Estado: {snapshot_status(metrics, config)}\n"
-        f"Precio: {price:.9f} USDC por STONK\n"
-        f"Rango {'on-chain' if position else 'configurado'}: {config.lower:.9f} – {config.upper:.9f}\n"
-        f"{personal}"
-        f"Movimiento hasta límite inferior: {(config.lower / price - 1) * 100:+.2f}%\n"
-        f"Movimiento hasta límite superior: {(config.upper / price - 1) * 100:+.2f}%\n"
-        f"APR pool (24h): {metrics['apr']:.2f}%\n"
-        f"Volumen pool 24h: USD {metrics['volume']:,.2f}\n"
-        f"TVL pool: USD {metrics['tvl']:,.2f}\n"
-        f"Fees pool 24h: USD {metrics['fees']:,.2f}\n"
-        "APR y fees del pool; no son rendimientos personales.\n"
-        f"Hora: {utc_now().isoformat()}"
-    )
+        lines.extend([
+            f"Posición ≈ {position['value_usdc']:.2f} USDC (sin fees)",
+            f"Fees pendientes ≈ {position['fee_value_usdc']:.4f} USDC",
+        ])
+    lines.append(f"APR pool (24h): {metrics['apr']:.1f}%")
+    if "CAMBIO VOLUMEN" in reasons:
+        lines.append(f"Volumen 24h: USD {metrics['volume']:,.0f}")
+    if "CAÍDA TVL" in reasons:
+        lines.append(f"TVL: USD {metrics['tvl']:,.0f}")
+    return "\n".join(lines)
+
 
 
 class Store:
@@ -175,7 +179,7 @@ def process_cycle(store, config, telegram, fetch=fetch_snapshot):
         LOGGER.error("CLMM API falló (%s/3): %s", state["failures"], error)
         if state["failures"] >= 3 and not state.get("degraded_notified"):
             try:
-                telegram.send(f"Raydium CLMM STONK/USDC\nPool: {POOL_ID}\nAPI_DEGRADED: 3 o más fallos consecutivos; precio y rango actuales desconocidos.")
+                telegram.send("Raydium CLMM STONK/USDC\nSin datos: 3 o más consultas fallidas.\nNo se puede confirmar el estado de la posición. Se reintentará.")
                 state["degraded_notified"] = True
             except Exception as send_error:
                 LOGGER.error("Telegram CLMM: %s", safe_error(send_error, telegram.token))
