@@ -1,5 +1,76 @@
 # Raydium APR + Backyard Vault Watcher
 
+## Monitor CLMM STONK/USDC
+
+`clmm_monitor.py` es un worker independiente para el pool
+`G4G5SzkbLFMhoSgHiQNeyJFt75sSDsL1rD8LVyT5xZbU`.
+Usa el mismo bot que el monitor existente y agrega `solders` para validar
+direcciones Solana. Instalar dependencias con `python -m pip install -r requirements.txt`.
+El NFT configurado es `BCB7fqJ6BsxP1XsEWLGPAfa5XxjqmW5as1W8vhQB3hJr`.
+
+```powershell
+python clmm_monitor.py --once
+python clmm_monitor.py
+```
+
+`--once` consulta la API y muestra las métricas sin enviar Telegram ni escribir
+la base. El modo continuo requiere `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`,
+envía un resumen inicial y comprueba cada 60 segundos. Para Railway, crear otro
+servicio con Start Command `python clmm_monitor.py`, las variables del bot y un
+volumen en `/app/data`. El Procfile existente sigue ejecutando el monitor anterior.
+
+| Variable | Valor predeterminado | Significado |
+|---|---|---|
+| `CLMM_LOWER` | `0.292925` | Límite inferior, USDC por STONK |
+| `CLMM_UPPER` | `0.374617` | Límite superior, USDC por STONK |
+| `CLMM_NEAR_PCT` | `2` | Cercanía porcentual al límite |
+| `CLMM_APR_CHANGE_PP` | `50` | Cambio de APR en puntos porcentuales |
+| `CLMM_VOLUME_CHANGE_PCT` | `25` | Cambio porcentual de volumen 24h |
+| `CLMM_TVL_DROP_PCT` | `10` | Caída porcentual de TVL |
+| `CLMM_CHECK_INTERVAL_SECONDS` | `60` | Pausa entre consultas |
+| `CLMM_DB_PATH` | `data/clmm_monitor.db` | Base SQLite persistente |
+| `CLMM_NFT_MINT` | `BCB7fqJ6BsxP1XsEWLGPAfa5XxjqmW5as1W8vhQB3hJr` | NFT de la posición |
+| `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | RPC de lectura Solana; configurable si hay límites de uso |
+
+Alerta al cambiar entre `IN_RANGE`, `NEAR_LOWER`, `NEAR_UPPER`, `OUT_BELOW`
+y `OUT_ABOVE`, incluyendo el regreso al rango. El límite superior se considera
+fuera de rango. La cercanía inferior se mide como `(precio / inferior - 1) * 100`
+y la superior como `(superior / precio - 1) * 100`. Los cambios de APR, volumen
+y TVL se comparan con el último resumen entregado; cada resumen exitoso actualiza
+esas referencias. No repite el mismo estado sin cambios significativos.
+Después de tres fallos consecutivos avisa `API_DEGRADED` y al recuperar datos
+envía `API_RECOVERED`. Los envíos fallidos se reintentan en el siguiente ciclo.
+Estado e historial se conservan en SQLite. Cambiar rango o umbrales reinicia
+las referencias de notificación.
+
+En modo normal, `clmm_position.py` deriva la cuenta de posición desde el NFT,
+valida programa, discriminator, mints y pool, y lee posición, pool y ticks límite
+en una única respuesta `getMultipleAccounts` con commitment `confirmed`.
+El rango proviene de los ticks on-chain y reemplaza los límites manuales.
+El estado dentro/fuera se decide por ticks, sin el redondeo de la captura.
+Incluye cantidades estimadas de STONK/USDC, valor en USDC al precio del pool y
+fees personales pendientes calculados con fee growth y liquidez (no sólo los
+fees almacenados en la cuenta). Los saldos usan matemática Decimal y pueden
+diferir en unidades mínimas del redondeo entero del contrato; son estimaciones,
+no una cotización ejecutable de retiro. Los rewards adicionales no se calculan.
+No calcula PnL ni APR personal; el APR, TVL, volumen y fees 24h siguen siendo
+métricas generales del pool. Los datos REST y RPC pueden tener distinta antigüedad.
+
+Alerta también por cambios de liquidez y marca `NO_LIQUIDITY` cuando es cero.
+Una cuenta ausente se trata como error (posible cierre o indisponibilidad), nunca
+como saldo cero confirmado. Si falla RPC no usa silenciosamente el rango manual:
+registra el error y aplica las alertas de degradación. No requiere claves privadas,
+no conecta wallets ni firma transacciones.
+
+Para consultar sólo el pool usar `python clmm_monitor.py --pool-only --once`
+o ejecutar `--pool-only` continuamente. En ese modo los límites manuales provienen
+de la captura y están redondeados; deben actualizarse si cambia la posición.
+Las consultas son periódicas y no garantizan detectar cruces breves.
+
+Validación: `python -m unittest -v test_clmm_monitor.py test_clmm_position.py`.
+Fuente: [API oficial Raydium V3](https://api-v3.raydium.io/docs/).
+Layouts y fees: [SDK oficial Raydium](https://github.com/raydium-io/raydium-sdk-V2/tree/master/src/raydium/clmm).
+
 Worker Python mínimo para Railway que consulta exclusivamente la API oficial V3 de Raydium:
 
 `GET https://api-v3.raydium.io/pools/info/ids?ids=58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2`
@@ -11,7 +82,7 @@ También monitorea el vault público de Backyard configurado en `BACKYARD_VAULT_
 ## Archivos
 
 - `main.py`: worker, cliente Raydium, cliente Telegram, reglas y SQLite.
-- `requirements.txt`: única dependencia, `requests`.
+- `requirements.txt`: `requests` y `solders` (lector CLMM on-chain).
 - `Procfile`: proceso `worker` para Railway.
 - `data/raydium_monitor.db`: base local creada automáticamente y persistida en el volumen del servicio.
 
