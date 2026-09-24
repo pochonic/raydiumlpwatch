@@ -13,7 +13,7 @@ import requests
 from solders.pubkey import Pubkey
 
 PROGRAM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"
-DEFAULT_NFT = "BCB7fqJ6BsxP1XsEWLGPAfa5XxjqmW5as1W8vhQB3hJr"
+DEFAULT_NFT = "Gt645DVmL1u8QAK3Bi4SMLtUMG25RCJN9qyGkpxLtLNg"
 Q64 = 1 << 64
 MOD128 = 1 << 128
 
